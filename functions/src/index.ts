@@ -6,7 +6,7 @@ import { MulticastMessage } from "firebase-admin/messaging";
 admin.initializeApp();
 
 // =============================
-// INTERFAZ DE NOTIFICACIÓN
+// INTERFAZ Y HELPERS
 // =============================
 interface Notification {
   type: string;
@@ -17,7 +17,7 @@ interface Notification {
 }
 
 // =================================================================
-// FUNCIÓN 1: Detecta un nuevo LIKE y crea la notificación
+// FUNCIÓN 1: Detecta un nuevo LIKE y crea el documento de notificación
 // =================================================================
 export const createNotificationOnNewLike = onDocumentCreated(
   {
@@ -25,64 +25,36 @@ export const createNotificationOnNewLike = onDocumentCreated(
     region: "southamerica-east1",
   },
   async (event) => {
-    logger.log("🔔 INICIO: createNotificationOnNewLike disparada");
-
+    logger.log("🔔 INICIO: createNotificationOnNewLike");
     const snap = event.data;
-    if (!snap) {
-      logger.log("❌ No hay datos de reacción, omitiendo.");
-      return;
-    }
+    if (!snap) return logger.log("❌ No hay datos de reacción.");
 
     const blogId = event.params.blogId;
-    const likerId: string = event.params.userId;
-
-    logger.log(`📝 Parámetros: blogId=${blogId}, likerId=${likerId}`);
+    const likerId = event.params.userId;
 
     const blogDoc = await admin.firestore().collection("blogs").doc(blogId).get();
-    if (!blogDoc.exists) {
-      logger.error(`❌ El blog no existe: ${blogId}`);
-      return;
-    }
+    if (!blogDoc.exists) return logger.error(`❌ Blog no existe: ${blogId}`);
 
     const blogData = blogDoc.data()!;
-    logger.log(`📄 Blog encontrado:`, JSON.stringify(blogData));
-
     const authorId = blogData.author?.uid;
-
-    if (!authorId) {
-      logger.error("❌ El blog no tiene author.uid definido");
-      return;
-    }
-
-    logger.log(`👤 Author ID: ${authorId}`);
-
-    if (authorId === likerId) {
-      logger.log("⚠️ Autor se dio like a sí mismo, no notificar.");
-      return;
-    }
-
-    const blogTitle = blogData.title ?? "tu publicación";
+    if (!authorId) return logger.error("❌ Blog sin author.uid");
+    if (authorId === likerId) return logger.log("⚠️ Autor se dio like a sí mismo.");
 
     const likerDoc = await admin.firestore().collection("users").doc(likerId).get();
     const likerName = likerDoc.exists ? likerDoc.data()!.fullName : "Alguien";
+    const blogTitle = blogData.title ?? "tu publicación";
 
-    logger.log(`👍 Liker: ${likerName} (${likerId})`);
-
-    await admin
-      .firestore()
-      .collection("users")
-      .doc(authorId)
-      .collection("notifications")
-      .add({
+    // El documento de Firestore solo contiene los DATOS, no el texto de la UI.
+    await admin.firestore().collection("users").doc(authorId).collection("notifications").add({
         type: "LIKE",
-        args: [likerName, blogTitle],
+        args: [likerName, blogTitle], // La app usará esto para construir el texto.
         targetRoute: `blog_post_detail/${blogId}`,
         targetId: blogId,
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
         status: "NEW",
       });
 
-    logger.log(`✅ Notificación LIKE creada para ${authorId} por ${likerId}`);
+    logger.log(`✅ Notificación LIKE creada para ${authorId}`);
   }
 );
 
@@ -95,43 +67,28 @@ export const createNotificationOnNewComment = onDocumentCreated(
     region: "southamerica-east1",
   },
   async (event) => {
+    logger.log("🔔 INICIO: createNotificationOnNewComment");
     const snap = event.data;
-    if (!snap) return logger.log("No hay datos de comentario, omitiendo.");
+    if (!snap) return logger.log("❌ No hay datos de comentario.");
 
     const comment = snap.data();
     const blogId = event.params.blogId;
+    if (!comment?.author?.uid) return logger.error("❌ Comentario sin author.uid");
 
-    if (!comment?.author?.uid) {
-      return logger.error("comment.author.uid es inválido");
-    }
-
-    const commenterId: string = comment.author.uid;
-    const commentText: string = comment.text ?? "";
+    const commenterId = comment.author.uid;
+    const commentText = comment.content ?? "";
 
     const blogDoc = await admin.firestore().collection("blogs").doc(blogId).get();
-    if (!blogDoc.exists) {
-      return logger.error("Blog no encontrado:", blogId);
-    }
+    if (!blogDoc.exists) return logger.error(`❌ Blog no existe: ${blogId}`);
 
     const blogData = blogDoc.data()!;
     const authorId = blogData.author?.uid;
-
-    if (!authorId) {
-      return logger.error("El blog no tiene author.uid");
-    }
-
-    if (authorId === commenterId) {
-      return logger.log("Autor comentó en su propio post, no notificar.");
-    }
+    if (!authorId) return logger.error("❌ Blog sin author.uid");
+    if (authorId === commenterId) return logger.log("⚠️ Autor comentó en su propio post.");
 
     const commenterName = comment.author.fullName ?? "Alguien";
-
-    await admin
-      .firestore()
-      .collection("users")
-      .doc(authorId)
-      .collection("notifications")
-      .add({
+    
+    await admin.firestore().collection("users").doc(authorId).collection("notifications").add({
         type: "COMMENT",
         args: [commenterName, commentText],
         targetRoute: `blog_post_detail/${blogId}`,
@@ -140,12 +97,13 @@ export const createNotificationOnNewComment = onDocumentCreated(
         status: "NEW",
       });
 
-    logger.log(`Notificación COMMENT creada para ${authorId} por ${commenterId}`);
+    logger.log(`✅ Notificación COMMENT creada para ${authorId}`);
   }
 );
 
+
 // =======================================================================
-// FUNCIÓN 3: Envía PUSH cuando aparece una nueva notificación
+// FUNCIÓN 3: Envía PUSH de solo-datos cuando aparece una notificación
 // =======================================================================
 export const sendPushOnNewNotification = onDocumentCreated(
   {
@@ -153,65 +111,46 @@ export const sendPushOnNewNotification = onDocumentCreated(
     region: "southamerica-east1",
   },
   async (event) => {
-    logger.log("📲 INICIO: sendPushOnNewNotification disparada");
-
+    logger.log("📲 INICIO: sendPushOnNewNotification");
     const snap = event.data;
-    if (!snap) {
-      logger.log("❌ Sin data, omitiendo.");
-      return;
-    }
+    if (!snap) return logger.log("❌ Sin data.");
 
     const notification = snap.data() as Notification;
     const userId = event.params.userId;
     const notificationId = snap.id;
 
-    logger.log(`📝 Notificación creada para userId: ${userId}, tipo: ${notification.type}`);
-
-    const tokensSnapshot = await admin
-      .firestore()
-      .collection("users")
-      .doc(userId)
-      .collection("deviceTokens")
-      .get();
-
-    if (tokensSnapshot.empty) {
-      logger.log(`⚠️ Usuario sin tokens: ${userId}`);
-      return;
-    }
+    const tokensSnapshot = await admin.firestore().collection("users").doc(userId).collection("deviceTokens").get();
+    if (tokensSnapshot.empty) return logger.log(`⚠️ Usuario sin tokens: ${userId}`);
 
     const tokens = tokensSnapshot.docs.map((doc) => doc.data().token);
     logger.log(`📱 Tokens encontrados: ${tokens.length}`);
+    
+    // --- CORRECCIÓN FINAL ---
+    // Construir un payload de SOLO-DATOS.
+    // La app se encargará de crear el título y el cuerpo.
+    const dataPayload: { [key: string]: string } = {
+      type: notification.type ?? "UNKNOWN",
+      notificationId: notificationId,
+      targetRoute: notification.targetRoute ?? "",
+      targetId: notification.targetId ?? "",
+    };
 
-    const title = buildTitle(notification);
-    const body = buildBody(notification);
+    // Añadir los argumentos de forma individual (arg0, arg1, etc.)
+    notification.args?.forEach((arg, index) => {
+      dataPayload[`arg${index}`] = arg;
+    });
 
-    logger.log(`📧 Mensaje - Título: "${title}", Cuerpo: "${body}"`);
+    logger.log("📦 Payload de datos a enviar:", dataPayload);
 
     const message: MulticastMessage = {
-      notification: { title, body },
-      data: {
-        targetRoute: notification.targetRoute ?? "",
-        targetId: notification.targetId ?? "",
-        type: notification.type ?? "",
-        notificationId,
-      },
+      data: dataPayload, // <-- SOLO se usa el campo 'data'
       tokens,
     };
 
     try {
-      // ✅ Usar sendEachForMulticast en lugar de sendMulticast
-      // para evitar el error 404 /batch en regiones fuera de us-central1
       const response = await admin.messaging().sendEachForMulticast(message);
-
-      const successCount = response.responses.filter((r) => r.success).length;
-      const failureCount = response.responses.filter((r) => !r.success).length;
-
-      logger.log(
-        `✅ Push enviado a ${tokens.length} dispositivos. ` +
-        `Éxitos: ${successCount}, Fallos: ${failureCount}`
-      );
-
-      // Limpieza de tokens inválidos
+      logger.log(`✅ Push de datos enviado. Éxitos: ${response.successCount}, Fallos: ${response.failureCount}`);
+      
       const tokensToDelete: string[] = [];
 
       response.responses.forEach((res, idx) => {
@@ -249,33 +188,9 @@ export const sendPushOnNewNotification = onDocumentCreated(
         await batch.commit();
         logger.log(`🧹 Tokens inválidos eliminados: ${tokensToDelete.length}`);
       }
+
     } catch (error) {
-      logger.error("❌ Error enviando push:", error);
+      logger.error("❌ Error enviando push de datos:", error);
     }
   }
 );
-
-// =================================================================
-// HELPERS
-// =================================================================
-function buildTitle(notification: Notification): string {
-  switch (notification.type) {
-    case "LIKE":
-      return `${notification.args?.[0] ?? "Alguien"} le dio like a tu publicación`;
-    case "COMMENT":
-      return `${notification.args?.[0] ?? "Alguien"} comentó en tu publicación`;
-    default:
-      return "Tienes una nueva notificación";
-  }
-}
-
-function buildBody(notification: Notification): string {
-  switch (notification.type) {
-    case "LIKE":
-      return `Publicación: ${notification.args?.[1] ?? ""}`;
-    case "COMMENT":
-      return notification.args?.[1] ?? "";
-    default:
-      return "";
-  }
-}
